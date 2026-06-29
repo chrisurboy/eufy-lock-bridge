@@ -1,0 +1,14 @@
+{
+  "name": "eufy-lock-bridge",
+  "version": "0.1.0",
+  "description": "HTTP bridge for controlling Eufy locks (e.g. T85D0) via P2P or cloud fallback",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "eufy-security-client": "3.8.0",
+    "express": "5.2.1"
+  }
+}
