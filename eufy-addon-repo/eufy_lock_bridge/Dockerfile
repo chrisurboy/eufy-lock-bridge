@@ -1,5 +1,8 @@
 FROM node:22-alpine
 
+# Install jq so we can read the Home Assistant configuration options
+RUN apk add --no-cache jq
+
 WORKDIR /app
 
 COPY package*.json ./
