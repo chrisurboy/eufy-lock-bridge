@@ -21,3 +21,4 @@ schema:
   eufy_password: "password"
   eufy_country: "str"
   locks: "str"
+init: false
