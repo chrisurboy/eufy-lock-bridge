@@ -1,7 +1,4 @@
-FROM node:18-alpine
-
-# Install requirements
-RUN apk add --no-cache iojs-headers nodejs npm
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -17,5 +14,5 @@ COPY . .
 # Expose the app port
 EXPOSE 8124
 
-# Run the server directly
-CMD [ "node", "server.js" ]
+# Read configuration directly from Home Assistant's options file and run
+CMD ["sh", "-c", "export EUFY_USERNAME=$(jq -r '.eufy_username' /data/options.json) && export EUFY_PASSWORD=$(jq -r '.eufy_password' /data/options.json) && export EUFY_COUNTRY=$(jq -r '.eufy_country' /data/options.json) && export LOCKS=$(jq -r '.locks' /data/options.json) && node server.js"]
