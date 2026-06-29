@@ -1,18 +1,21 @@
-FROM ghcr.io/home-assistant/base:latest
+FROM node:18-alpine
 
-LABEL \
-  io.hass.version="0.1.0" \
-  io.hass.type="app" \
-  io.hass.arch="armhf|aarch64|amd64|armv7|i386"
-
-# Install Node.js and npm (HA base images are Alpine-based)
-RUN apk add --no-cache nodejs npm
+# Install requirements
+RUN apk add --no-cache iojs-headers nodejs npm
 
 WORKDIR /app
-COPY server.js package.json package-lock.json* ./
-RUN npm install --omit=dev --no-audit --no-fund
 
-COPY run.sh /
-RUN chmod a+x /run.sh
+# Copy package management files
+COPY package*.json ./
 
-CMD [ "/run.sh" ]
+# Install dependencies
+RUN npm install
+
+# Copy application code
+COPY . .
+
+# Expose the app port
+EXPOSE 8124
+
+# Run the server directly
+CMD [ "node", "server.js" ]
