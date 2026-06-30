@@ -11,34 +11,11 @@
 //   GET  /status/:key
 //   GET  /locks          -> lists configured keys
 //   GET  /health
-//
-// IMPORTANT CAVEATS (read before relying on this):
-// - The cloud fallback (param_type 6000) is reverse-engineered by the
-//   community, not documented by Anker/Eufy. Reported working for closely
-//   related lock models (C210/C30 family), NOT confirmed for every T85D0
-//   unit/firmware. Test carefully before trusting it on a door you need
-//   to get through.
-// - Known root cause for the underlying P2P/DSK failure (error 20028) on
-//   multi-device Eufy accounts: a Bluetooth-only accessory on the same
-//   account can corrupt the account-wide key lookup for ALL devices,
-//   including fully P2P-capable locks like these. This bridge is a
-//   workaround, not a fix — find and isolate that device when you get a
-//   chance, since fixing it restores real P2P (push state updates,
-//   no polling, no reverse-engineered codes) for both locks below.
-// - This script holds your Eufy account credentials. Keep this add-on's
-//   config private; don't expose its HTTP port outside your home network.
-// - There is no push event for lock state on the cloud-fallback path, so
-//   we poll device properties for a few seconds after sending a command
-//   to confirm it actually moved.
 
 const express = require("express");
 const fs = require("fs");
 const { EufySecurity, LogLevel } = require("eufy-security-client");
 
-// Read add-on configuration directly from the file Supervisor mounts for
-// every add-on, regardless of base image. This avoids depending on bashio
-// (which requires jq and the HA base image's s6-overlay setup) — we just
-// need plain JSON parsing, which Node does natively.
 const OPTIONS_PATH = "/data/options.json";
 
 function loadOptions() {
@@ -61,25 +38,20 @@ const EUFY_USERNAME = (options && options.eufy_username) || process.env.EUFY_USE
 const EUFY_PASSWORD = (options && options.eufy_password) || process.env.EUFY_PASSWORD;
 const EUFY_COUNTRY = (options && options.eufy_country) || process.env.EUFY_COUNTRY || "US";
 
-// Locks are configured as KEY:SERIAL pairs, comma-separated, e.g.:
-//   garage:T85D073325220419,side_door:T85D0733252706B7
 const LOCKS_RAW = (options && options.locks) || process.env.LOCKS || "";
 
-// Eufy "param_type 6000" lock state values (reverse-engineered).
 const PARAM_TYPE_LOCK_STATE = 6000;
 const PARAM_VALUE_LOCK = "4";
 const PARAM_VALUE_UNLOCK = "3";
 
 if (!EUFY_USERNAME || !EUFY_PASSWORD) {
   console.error(
-    "Missing eufy_username / eufy_password. Set these in the add-on Configuration tab, " +
-      "then make sure you click Save AND restart the add-on (Configuration changes don't " +
-      "apply to an already-running add-on)."
+    "Missing eufy_username / eufy_password. Set these in the add-on Configuration tab."
   );
   process.exit(1);
 }
 
-const LOCKS = {}; // key -> serial
+const LOCKS = {}; 
 for (const pair of LOCKS_RAW.split(",").map((s) => s.trim()).filter(Boolean)) {
   const idx = pair.indexOf(":");
   if (idx === -1) {
@@ -92,10 +64,7 @@ for (const pair of LOCKS_RAW.split(",").map((s) => s.trim()).filter(Boolean)) {
 }
 
 if (Object.keys(LOCKS).length === 0) {
-  console.error(
-    'No locks configured. Set LOCKS to a comma-separated key:serial list, ' +
-      'e.g. "garage:T85D073325220419,side_door:T85D0733252706B7".'
-  );
+  console.error('No locks configured. Set LOCKS to a comma-separated key:serial list.');
   process.exit(1);
 }
 
@@ -103,8 +72,8 @@ console.log("Configured locks:", LOCKS);
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-let client; // EufySecurity instance, connected once at startup, shared by all locks
-let connecting; // promise guard so concurrent requests don't double-connect
+let client; 
+let connecting; 
 
 async function getClient() {
   if (client && client.isConnected && client.isConnected()) return client;
@@ -144,9 +113,7 @@ async function findLockBySerial(c, serial) {
   const lock = devices.find((d) => d.getSerial() === serial);
   if (!lock) {
     const available = devices.map((d) => `${d.getName()} (${d.getSerial()})`).join(", ");
-    throw new Error(
-      `Lock with serial "${serial}" not found. Devices on account: ${available || "(none returned)"}`
-    );
+    throw new Error(`Lock with serial "${serial}" not found.`);
   }
   return lock;
 }
@@ -161,9 +128,6 @@ async function getLockedState(lock) {
   return { locked: !!props.locked, raw: props };
 }
 
-// Attempt P2P control first (works for fully-supported models / once the
-// account's DSK lookup succeeds; harmlessly fails through to cloud
-// fallback otherwise).
 async function tryP2P(lock, station, shouldLock) {
   if (!station) return false;
 
@@ -188,19 +152,12 @@ async function tryP2P(lock, station, shouldLock) {
       await lock.unlock();
       return true;
     }
-    if (typeof station.unlock === "function" && !shouldLock) {
-      await station.unlock(lock);
-      return true;
-    }
   } catch (err) {
-    console.warn("P2P lock/unlock attempt failed, will try cloud fallback:", err.message);
+    console.warn("P2P lock/unlock attempt failed, trying cloud fallback:", err.message);
   }
   return false;
 }
 
-// Reverse-engineered cloud fallback via the library's own public
-// device.setParameters() method (handles auth/signing/response checks the
-// same way the library does for every other supported device).
 async function cloudFallback(lock, shouldLock) {
   const ok = await lock.setParameters([
     {
@@ -210,10 +167,7 @@ async function cloudFallback(lock, shouldLock) {
   ]);
 
   if (!ok) {
-    throw new Error(
-      "Cloud fallback (setParameters) returned failure. Check add-on logs " +
-        "for the underlying 'Set parameter - Response code not ok' error detail."
-    );
+    throw new Error("Cloud fallback (setParameters) returned failure.");
   }
   return ok;
 }
@@ -243,16 +197,12 @@ async function setLockState(serial, shouldLock) {
     if (confirmed) {
       return { method: "p2p", message: "Confirmed via P2P", locked: shouldLock };
     }
-    console.warn("P2P command sent but state did not confirm; trying cloud fallback.");
   }
 
   await cloudFallback(lock, shouldLock);
   const confirmed = await confirmState(lock, shouldLock, { attempts: 10, intervalMs: 1500 });
   if (!confirmed) {
-    throw new Error(
-      "Cloud fallback command was accepted by Eufy's API but the lock state never confirmed the change. " +
-        "Check the lock physically and check add-on logs."
-    );
+    throw new Error("Cloud fallback command accepted but state never confirmed.");
   }
   return { method: "cloud", message: "Confirmed via cloud fallback", locked: shouldLock };
 }
@@ -279,25 +229,25 @@ app.get("/locks", (_req, res) => {
 
 app.post("/lock/:key", async (req, res) => {
   const serial = resolveSerialOrFail(req, res);
-  if (!serial) return;
+  if (!serial) return; // resolveSerialOrFail already called res.status(404).json
   try {
     const result = await setLockState(serial, true);
-    res.json({ ok: true, key: req.params.key, ...result });
+    return res.json({ ok: true, key: req.params.key, ...result });
   } catch (err) {
     console.error(`Lock failed for "${req.params.key}":`, err);
-    res.status(500).json({ ok: false, key: req.params.key, error: err.message });
+    return res.status(500).json({ ok: false, key: req.params.key, error: err.message });
   }
 });
 
 app.post("/unlock/:key", async (req, res) => {
   const serial = resolveSerialOrFail(req, res);
-  if (!serial) return;
+  if (!serial) return; // resolveSerialOrFail already called res.status(404).json
   try {
     const result = await setLockState(serial, false);
-    res.json({ ok: true, key: req.params.key, ...result });
+    return res.json({ ok: true, key: req.params.key, ...result });
   } catch (err) {
     console.error(`Unlock failed for "${req.params.key}":`, err);
-    res.status(500).json({ ok: false, key: req.params.key, error: err.message });
+    return res.status(500).json({ ok: false, key: req.params.key, error: err.message });
   }
 });
 
@@ -308,10 +258,10 @@ app.get("/status/:key", async (req, res) => {
     const c = await getClient();
     const lock = await findLockBySerial(c, serial);
     const { locked, raw } = await getLockedState(lock);
-    res.json({ ok: true, key: req.params.key, locked, properties: raw });
+    return res.json({ ok: true, key: req.params.key, locked, properties: raw });
   } catch (err) {
     console.error(`Status check failed for "${req.params.key}":`, err);
-    res.status(500).json({ ok: false, key: req.params.key, error: err.message });
+    return res.status(500).json({ ok: false, key: req.params.key, error: err.message });
   }
 });
 
@@ -319,5 +269,4 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
   console.log(`eufy-lock-bridge listening on port ${PORT}`);
-  console.log(`Configured lock keys: ${Object.keys(LOCKS).join(", ")}`);
 });
