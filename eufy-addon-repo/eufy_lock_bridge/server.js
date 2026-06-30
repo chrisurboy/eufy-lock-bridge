@@ -1,9 +1,9 @@
 // eufy-lock-bridge (multi-lock)
 //
 // HTTP bridge for controlling multiple Eufy locks (e.g. T85D0 garage + side
-// door) that aren't fully supported yet by eufy-security-ws. Tries normal
-// P2P lock/unlock first, and falls back to a reverse-engineered cloud REST
-// call for models/situations where P2P isn't available.
+// door) that aren't fully supported yet by eufy-security-ws. Routes directly 
+// to a reverse-engineered cloud REST call for models/situations where P2P 
+// local connectivity is unavailable or freezes up the container execution thread.
 //
 // Endpoints (per configured lock, addressed by a short key like "garage"):
 //   POST /lock/:key
@@ -112,50 +112,14 @@ async function findLockBySerial(c, serial) {
   const devices = await c.getDevices();
   const lock = devices.find((d) => d.getSerial() === serial);
   if (!lock) {
-    const available = devices.map((d) => `${d.getName()} (${d.getSerial()})`).join(", ");
     throw new Error(`Lock with serial "${serial}" not found.`);
   }
   return lock;
 }
 
-async function findStation(c, lock) {
-  const stations = await c.getStations();
-  return stations.find((s) => s.getSerial() === lock.getStationSerial());
-}
-
 async function getLockedState(lock) {
   const props = await lock.getProperties();
   return { locked: !!props.locked, raw: props };
-}
-
-async function tryP2P(lock, station, shouldLock) {
-  if (!station) return false;
-
-  if (!station.isConnected()) {
-    try {
-      await station.connect();
-      await delay(1500);
-    } catch (err) {
-      console.warn("Station P2P connect failed:", err.message);
-      return false;
-    }
-  }
-
-  if (!station.isConnected()) return false;
-
-  try {
-    if (shouldLock && typeof lock.lock === "function") {
-      await lock.lock();
-      return true;
-    }
-    if (!shouldLock && typeof lock.unlock === "function") {
-      await lock.unlock();
-      return true;
-    }
-  } catch (err) {
-    console.warn("P2P lock/unlock attempt failed, trying cloud fallback:", err.message);
-  }
-  return false;
 }
 
 async function cloudFallback(lock, shouldLock) {
@@ -172,7 +136,7 @@ async function cloudFallback(lock, shouldLock) {
   return ok;
 }
 
-async function confirmState(lock, shouldLock, { attempts = 8, intervalMs = 1500 } = {}) {
+async function confirmState(lock, shouldLock, { attempts = 10, intervalMs = 1500 } = {}) {
   for (let i = 1; i <= attempts; i++) {
     await delay(intervalMs);
     const { locked } = await getLockedState(lock);
@@ -184,22 +148,16 @@ async function confirmState(lock, shouldLock, { attempts = 8, intervalMs = 1500 
 async function setLockState(serial, shouldLock) {
   const c = await getClient();
   const lock = await findLockBySerial(c, serial);
-  const station = await findStation(c, lock);
 
   const before = await getLockedState(lock);
   if (before.locked === shouldLock) {
     return { method: "none", message: "Already in desired state", locked: before.locked };
   }
 
-  const p2pAttempted = await tryP2P(lock, station, shouldLock);
-  if (p2pAttempted) {
-    const confirmed = await confirmState(lock, shouldLock, { attempts: 6, intervalMs: 1000 });
-    if (confirmed) {
-      return { method: "p2p", message: "Confirmed via P2P", locked: shouldLock };
-    }
-  }
-
+  // Bypassing local P2P logic to prevent asynchronous socket hangs inside Hyper-V container environments
+  console.log(`[Bridge] Firing direct cloud fallback command for device: ${serial}`);
   await cloudFallback(lock, shouldLock);
+  
   const confirmed = await confirmState(lock, shouldLock, { attempts: 10, intervalMs: 1500 });
   if (!confirmed) {
     throw new Error("Cloud fallback command accepted but state never confirmed.");
@@ -229,7 +187,7 @@ app.get("/locks", (_req, res) => {
 
 app.post("/lock/:key", async (req, res) => {
   const serial = resolveSerialOrFail(req, res);
-  if (!serial) return; // resolveSerialOrFail already called res.status(404).json
+  if (!serial) return; 
   try {
     const result = await setLockState(serial, true);
     return res.json({ ok: true, key: req.params.key, ...result });
@@ -241,7 +199,7 @@ app.post("/lock/:key", async (req, res) => {
 
 app.post("/unlock/:key", async (req, res) => {
   const serial = resolveSerialOrFail(req, res);
-  if (!serial) return; // resolveSerialOrFail already called res.status(404).json
+  if (!serial) return; 
   try {
     const result = await setLockState(serial, false);
     return res.json({ ok: true, key: req.params.key, ...result });
